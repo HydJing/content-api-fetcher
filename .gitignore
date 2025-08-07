@@ -13,3 +13,4 @@ wheels/
 # Local configuration
 .env
 login_session_cache.json
+last_processed_page_token.json
