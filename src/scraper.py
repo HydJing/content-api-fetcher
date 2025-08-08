@@ -1,114 +1,158 @@
-import requests
-import logging
+"""
+This module provides a class for scraping stories from an API, handling
+pagination and checkpoints for robust, resumable operations.
+"""
+
 import json
+import logging
 import time
-import random
 from pathlib import Path
-from typing import List, Dict, Any, Optional
-from requests.exceptions import RequestException
+from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
-from .downloader import download_media_for_story
+import requests
+from requests.exceptions import RequestException
 
-logger = logging.getLogger(__name__)
+# Use a consistent logger for the module
+_LOGGER = logging.getLogger(__name__)
 
-# Define the path for the checkpoint file
-CHECKPOINT_PATH = Path("last_processed_page_token.json")
+# Import the new MediaDownloader class
+from .downloader import MediaDownloader
 
-def _save_pagination_checkpoint(page_token: str):
-    """Saves the last processed page token to a checkpoint file."""
-    checkpoint_data = {'page_token': page_token, 'timestamp': time.time()}
-    try:
-        with open(CHECKPOINT_PATH, "w") as f:
-            json.dump(checkpoint_data, f)
-        logger.info(f"Pagination checkpoint saved. Next page token: {page_token}")
-    except (IOError, TypeError) as e:
-        logger.error(f"Failed to save pagination checkpoint: {e}")
 
-def _load_pagination_checkpoint() -> Optional[str]:
-    """Loads the last processed page token from the checkpoint file."""
-    if not CHECKPOINT_PATH.exists():
-        logger.error(f"Check point tracking file not found, Create one now.")
-        _save_pagination_checkpoint('0')
-
-    try:
-        with open(CHECKPOINT_PATH, "r") as f:
-            checkpoint_data = json.load(f)
-        page_token = checkpoint_data.get('page_token')
-        if page_token is not None:
-            logger.info(f"Pagination checkpoint found. Resuming from page token: {page_token}")
-            return page_token
-        else:
-            logger.warning("Checkpoint file is empty or malformed. Starting from the beginning.")
-            return None
-    except (json.JSONDecodeError, KeyError, IOError) as e:
-        logger.error(f"Error loading checkpoint file: {e}. Starting from the beginning.")
-        return None
-
-def fetch_api_data(session: requests.Session, url: str, params: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+class StoryScraper:
     """
-    Uses an authenticated session to fetch data from an API endpoint.
-    """
-    try:
-        logger.info(f"Fetching API data from: {url} with params: {params}")
-        response = session.get(url, params=params, timeout=20)
-        response.raise_for_status()
-        
-        return response.json()
-    except RequestException as e:
-        logger.error(f"Failed to fetch API data from {url}: {e}")
-        return None
-    except json.JSONDecodeError:
-        logger.error(f"Failed to decode JSON from API response for {url}. Response text: {response.text[:200]}...")
-        return None
-
-def get_all_stories(session: requests.Session, base_api_url: str, child_id: str, download_base_path: str) -> None:
-    """
-    Fetches all stories for a given child ID, handling pagination and downloads the media.
-    """
-    # Load the page token from the checkpoint, or start from "0"
-    page_token = _load_pagination_checkpoint() or "0"
+    A class to fetch stories from an API with pagination and checkpoint support.
     
-    stories_endpoint = f"children/{child_id}/stories"
-    full_api_url = urljoin(base_api_url, stories_endpoint)
+    This class manages the API interaction, including handling pagination tokens,
+    retrying failed requests, and saving progress.
+    """
 
-    while page_token is not None:
+    # Class-level constant for the checkpoint file path
+    CHECKPOINT_PATH = Path("last_processed_page_token.json")
+
+    def __init__(self, session: requests.Session, base_api_url: str, child_id: str):
+        """
+        Initializes the StoryScraper with the necessary dependencies.
+
+        Args:
+            session: An authenticated requests.Session object.
+            base_api_url: The base URL for the API endpoints.
+            child_id: The ID of the child to fetch stories for.
+        """
+        self._session = session
+        self._base_api_url = base_api_url
+        self._child_id = child_id
+        self._media_downloader = MediaDownloader(session=session)
+
+    def _load_checkpoint(self) -> Optional[str]:
+        """
+        Loads the last processed page token from the checkpoint file.
+
+        Returns:
+            The page token as a string, or None if the file is not found or invalid.
+        """
+        if not self.CHECKPOINT_PATH.exists():
+            _LOGGER.info("Checkpoint file not found. Starting from the beginning.")
+            return None
+
+        try:
+            with open(self.CHECKPOINT_PATH, "r", encoding="utf-8") as f:
+                checkpoint_data = json.load(f)
+            page_token = checkpoint_data.get("page_token")
+            if page_token:
+                _LOGGER.info(f"Resuming from page token: {page_token}")
+                return page_token
+            _LOGGER.warning("Checkpoint file is malformed. Starting from the beginning.")
+            return None
+        except (json.JSONDecodeError, KeyError, IOError) as e:
+            _LOGGER.error(f"Error loading checkpoint file: {e}. Starting from the beginning.")
+            return None
+
+    def _save_checkpoint(self, page_token: str):
+        """
+        Saves the last processed page token to a checkpoint file.
+
+        Args:
+            page_token: The page token to save.
+        """
+        checkpoint_data = {"page_token": page_token, "timestamp": time.time()}
+        try:
+            with open(self.CHECKPOINT_PATH, "w", encoding="utf-8") as f:
+                json.dump(checkpoint_data, f)
+            _LOGGER.info(f"Pagination checkpoint saved. Next page token: {page_token}")
+        except (IOError, TypeError) as e:
+            _LOGGER.error(f"Failed to save pagination checkpoint: {e}")
+
+    def _fetch_api_page(self, page_token: Optional[str]) -> Optional[Dict[str, Any]]:
+        """
+        Fetches a single page of story data from the API.
+
+        Args:
+            page_token: The token for the next page, or None for the first page.
+
+        Returns:
+            The JSON response as a dictionary, or None on failure.
+        """
+        stories_endpoint = f"children/{self._child_id}/stories"
+        full_api_url = urljoin(self._base_api_url, stories_endpoint)
         params = {
-            "page_token": page_token,
             "sort_by": "updated_at",
             "story_type": "all"
         }
-        
-        api_response = fetch_api_data(session, full_api_url, params=params)
+        if page_token:
+            params["page_token"] = page_token
 
-        if api_response and 'stories' in api_response:
-            stories_on_page = api_response.get('stories', [])
+        try:
+            _LOGGER.info(f"Fetching API data from: {full_api_url} with token: {page_token}")
+            response = self._session.get(full_api_url, params=params, timeout=20)
+            response.raise_for_status()
             
+            return response.json()
+        except RequestException as e:
+            _LOGGER.error(f"Failed to fetch API data from {full_api_url}: {e}")
+            return None
+        except json.JSONDecodeError:
+            _LOGGER.error("Failed to decode JSON from API response. Response text: %s...", response.text[:200])
+            return None
+
+    def download_all_stories(self, download_base_path: str):
+        """
+        Fetches all stories for the specified child ID, handling pagination, and
+        downloads their associated media.
+
+        Args:
+            download_base_path: The local path to save downloaded files.
+        """
+        page_token = self._load_checkpoint()
+        
+        while True:
+            api_response = self._fetch_api_page(page_token)
+
+            if not api_response or not api_response.get("stories"):
+                _LOGGER.info("No more pages or stories to fetch. Pagination is complete.")
+                break
+
+            stories_on_page = api_response.get("stories", [])
+            _LOGGER.info(f"Processing {len(stories_on_page)} stories from the current page.")
+
             for story in stories_on_page:
-                story_id = str(story.get('id'))
-                # Download media for the story
-                if download_media_for_story(session, story, download_base_path):
-                    logger.info(f"Successfully processed and downloaded media for story ID: {story_id}")
-                else:
-                    logger.warning(f"Skipping checkpoint save for story {story_id} due to download failure.")
-                    # If a download fails, we stop the process to retry this page later
+                download_successful = self._media_downloader.download_media_for_story(
+                    story, download_base_path)
+                if not download_successful:
+                    # If a download fails, we can stop the process to retry this page later
+                    _LOGGER.error("A download failed. Stopping the scraping process to resume later.")
+                    self._save_checkpoint(page_token) # Save the current page token before exiting
                     return
+
+            page_token = api_response.get("next_page_token")
+
+            if not page_token:
+                _LOGGER.info("Reached the end of all pages.")
+                break
             
-            logger.info("All stories from the current page have been processed.")
-            
-            # Get the next page token from the response
-            page_token = api_response.get('next_page_token')
-            
-            if page_token:
-                logger.info(f"Next page token: {page_token}. Pausing before next request...")
-                _save_pagination_checkpoint(page_token) # Save the checkpoint before the next request
-                # slepp_time = random.randint(5, 15)
-                # logger.info(f"sleeping {slepp_time} seconds for next call")
-                logger.info('=' * 80)
-                time.sleep(1)
-                
-            else:
-                logger.info("No more pages to fetch for stories. Pagination is complete.")
-        else:
-            logger.warning("API response did not contain 'stories' or was empty. Stopping pagination.")
-            page_token = None
+            self._save_checkpoint(page_token)
+            _LOGGER.info(f"Next page token: {page_token}. Pausing before next request...")
+            _LOGGER.info('=' * 80) # line divider
+            time.sleep(1) # Consider using an exponential backoff or jitter here
+

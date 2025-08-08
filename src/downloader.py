@@ -1,96 +1,125 @@
-import os
+"""
+This module provides a dedicated class for downloading media items from URLs.
+"""
+
 import logging
-import time
-import random
 import re
-from typing import Dict, Any, Optional
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
 import requests
+from requests.exceptions import RequestException
 
-logger = logging.getLogger(__name__)
+_LOGGER = logging.getLogger(__name__)
 
-STORY_ITEM_MEDIA_VIDEO_TYPE = 'video'
-STORY_ITEM_MEDIA_IMAGE_TYPE = 'image'
-STORY_ITEM_MEDIA_PDF_TYPE = 'image'
 
-def download_file(session: requests.Session, url: str, folder_path: str, file_name: str) -> bool:
+class MediaDownloader:
     """
-    Downloads a single file from a given URL using an authenticated session.
+    A class to handle the downloading of media files from a given URL.
 
-    Args:
-        session (requests.Session): The authenticated session object.
-        url (str): The URL of the file to download.
-        folder_path (str): The local folder path to save the file.
-        file_name (str): The desired file name.
-
-    Returns:
-        bool: True on successful download, False otherwise.
+    This class provides methods to download individual files and
+    to process all media items associated with a story.
     """
-    file_path = os.path.join(folder_path, file_name)
-    os.makedirs(folder_path, exist_ok=True)
 
-    if os.path.exists(file_path):
-        logger.info(f"File '{file_name}' already exists. Skipping download.")
-        return True
+    def __init__(self, session: requests.Session):
+        """
+        Initializes the MediaDownloader with an authenticated session.
 
-    try:
-        logger.info(f"Downloading file from {url} to {file_path}...")
-        with session.get(url, stream=True, timeout=30) as response:
-            response.raise_for_status()
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-        logger.info(f"Successfully downloaded '{file_name}'.")
-        return True
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Failed to download file from {url}: {e}")
-        return False
+        Args:
+            session: An authenticated requests.Session object.
+        """
+        self._session = session
 
-def download_media_for_story(session: requests.Session, story: Dict[str, Any], download_base_path: str) -> bool:
-    """
-    Downloads all media (images and videos) for a single story.
-
-    Args:
-        session (requests.Session): The authenticated session object.
-        story (Dict[str, Any]): The story dictionary from the API response.
-        download_base_path (str): The base directory to save all downloads.
-
-    Returns:
-        bool: True if all media for the story were downloaded, False otherwise.
-    """
-    story_id = story.get('id')
-    story_title = story.get('title', f"story_{story_id}").strip()
-    story_title = re.sub(r'[^a-zA-Z0-9_-]+', '_', story_title).strip('_')
-    media_items = story.get('media', [])
-    story_date = story.get('updated_at', 'created_at').replace("-", "").replace("T", "").replace(":", "").replace(".", "").replace("Z", "")
-    all_downloads_successful = True
-
-    if not media_items:
-        logger.info(f"Story '{story_title}' (ID: {story_id}) has no media to download.")
-        return True
-
-    logger.info(f"Processing media for story '{story_title}' (ID: {story_id})...")
+    def _sanitize_story_title(self, story_title: str) -> str:
+        """Sanitizes story title by removing invalid characters."""
+        sanitized = re.sub(r'[^a-zA-Z0-9_-]+', '_', story_title).strip('_')
+        return sanitized if sanitized else "untitled"
     
-    # Create a subfolder for the story
-    story_folder_name = f"{story_date}_{story_id}_{story_title.replace(' ', '_').replace('/', '_')}"
-    story_folder_path = os.path.join(download_base_path, story_folder_name)
-    os.makedirs(story_folder_path, exist_ok=True)
+    def _sanitize_story_datetime(self, story_datetime: str) -> str:
+        """Sanitizes file name by removing invalid characters."""
+        sanitized = re.sub(r'\D', '', story_datetime).strip()
+        return sanitized if sanitized else "nodate"
 
-    for item in media_items:
+    def _download_file(self, url: str, folder_path: Path, file_name: str) -> bool:
+        """
+        Downloads a single file from a given URL.
 
-        file_url = item.get('resized_url') or item.get('cloudfront_feature_url')
-        if not file_url:
-            logger.warning(f"Media item in story {story_id} has no valid URL. Skipping.")
-            continue
+        Args:
+            url: The URL of the file to download.
+            folder_path: The local folder path as a Path object.
+            file_name: The desired file name.
 
-        file_extension = ".mp4" if item.get('type') == 'video' else ".jpg"
-        file_name = f"{item.get('id', 'media_item')}{file_extension}"
+        Returns:
+            True on successful download, False otherwise.
+        """
+        file_path = folder_path / file_name
+        folder_path.mkdir(parents=True, exist_ok=True)
+
+        if file_path.exists():
+            _LOGGER.info("File '%s' already exists. Skipping download.", file_name)
+            return True
+
+        try:
+            _LOGGER.info("Downloading file from %s to %s...", url, file_path)
+            with self._session.get(url, stream=True, timeout=30) as response:
+                response.raise_for_status()
+                with file_path.open('wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+            _LOGGER.info("Successfully downloaded '%s'.", file_name)
+            return True
+        except RequestException as e:
+            _LOGGER.error("Failed to download file from %s: %s", url, e)
+            return False
+        except IOError as e:
+            _LOGGER.error("Failed to write media to file %s: %s", file_path, e)
+            return False
+
+    def download_media_for_story(self, story: Dict[str, Any], download_base_path: str) -> bool:
+        """
+        Downloads all media for a single story, creating a new subfolder for it.
+
+        Args:
+            story: A dictionary representing a single story from the API.
+            download_base_path: The base directory to save all downloads.
+
+        Returns:
+            True if all media for the story were downloaded, False otherwise.
+        """
+        story_id = story.get('id')
+        story_title = self._sanitize_story_title(story.get('title', f"story_{story_id}"))
+        media_items = story.get('media', [])
         
-        # slepp_time = random.randint(1, 5)
-        # logger.info(f"sleeping {slepp_time} seconds for next download")
-        logger.info('-' * 80)
-        time.sleep(1)
+        # Use updated_at or created_at for the date part of the folder name
+        story_date_sanitized = self._sanitize_story_datetime(story.get('updated_at', story.get('created_at', '')))
 
-        if not download_file(session, file_url, story_folder_path, file_name):
-            all_downloads_successful = False
+        if not media_items:
+            _LOGGER.info("Story '%s' (ID: %s) has no media to download.", story_title, story_id)
+            return True
 
-    return all_downloads_successful
+        _LOGGER.info("Processing media for story '%s' (ID: %s)...", story_title, story_id)
+        
+        # Create a subfolder for the story
+        story_folder_name = f"{story_date_sanitized}_{story_id}_{story_title}"
+        story_folder_path = Path(download_base_path) / story_folder_name
+        story_folder_path.mkdir(parents=True, exist_ok=True)
+
+        all_downloads_successful = True
+        for item in media_items:
+            file_url = item.get('resized_url') or item.get('cloudfront_feature_url')
+            if not file_url:
+                _LOGGER.warning("Media item in story %s has no valid URL. Skipping.", story_id)
+                continue
+
+            # Determine file extension based on media type
+            file_extension = '.mp4' if item.get('type') == 'video' else '.jpg'
+            file_name = f"{item.get('id', 'media_item')}{file_extension}"
+            _LOGGER.info('-' * 80) # line divider
+            # Add a delay to avoid rate-limiting issues
+            time.sleep(1)
+            
+            if not self._download_file(file_url, story_folder_path, file_name):
+                all_downloads_successful = False
+
+        return all_downloads_successful
