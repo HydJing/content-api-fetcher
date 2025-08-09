@@ -1,0 +1,10 @@
+    # .pre-commit-config.yaml
+    repos:
+      - repo: https://github.com/astral-sh/ruff-pre-commit
+        # The revision to use. Pin this to a specific version.
+        rev: v0.5.1
+        hooks:
+          - id: ruff
+            args: ["--fix"] # Automatically fix issues before committing
+          - id: ruff-format
+    

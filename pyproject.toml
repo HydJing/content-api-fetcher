@@ -9,3 +9,65 @@ dependencies = [
     "python-dotenv>=1.1.1",
     "requests>=2.32.4",
 ]
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.2.0",
+    "ruff>=0.12.8",
+]
+
+
+[tool.ruff]
+# Set the maximum line length for both the linter and formatter.
+line-length = 88
+# Specify the minimum Python version required by your project.
+target-version = "py312"
+# Exclude files or directories from being checked by Ruff.
+exclude = [
+    ".venv",
+    "venv",
+    "env",
+    ".git",
+    "__pycache__",
+    "build",
+    "dist",
+]
+
+[tool.ruff.lint]
+# A-Z list of selected rules. These are the rules that Ruff will enforce.
+# This list is comprehensive and covers a wide range of common style and bug checks.
+# For a full list of codes, see: https://docs.astral.sh/ruff/linter/#list-of-lint-rules
+select = [
+    "A",    # Builtin `A` style rules
+    "B",    # Bugbear
+    "C",    # mccabe complexity
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # isort (auto-sort imports)
+    "T",    # flake8-tidy-imports
+    "W",    # pycodestyle warnings
+    "D",    # pydocstyle
+    "PL",   # pylint
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+]
+# You can ignore specific rules globally if you have a strong reason to.
+# This is generally discouraged unless a rule conflicts with your project's
+# established style or a specific dependency.
+ignore = [
+    "D203",  # 1 blank line before class docstring (pydocstyle)
+    "D213",  # Multi-line docstring summary on the second line
+    "D406",  # Section name should end with a colon
+]
+
+[tool.ruff.lint.mccabe]
+# Rule-specific configurations can be set here.
+# For example, to adjust the maximum complexity allowed by the mccabe rule (C901).
+max-complexity = 10
+
+[tool.ruff.lint.isort]
+# Configuration for the isort rule.
+# This tells Ruff how to categorize imports, which is often a point of debate.
+# The `first-party` setting is a crucial best practice.
+known-first-party = ["src"] # Your project's package name
